@@ -34,7 +34,7 @@ namespace IdempotencyWithRedisLockMssqlDemo.Controllers
 
 
         [HttpPost]
-        public async Task<IActionResult> Post([FromBody] decimal Amount, 
+        public async Task<IActionResult> Post([FromBody] decimal amount, 
                                               [FromHeader(Name ="X-Idempotency-Key")] string Key )
         {
             var userId = "User-1";
@@ -63,13 +63,49 @@ namespace IdempotencyWithRedisLockMssqlDemo.Controllers
                 var payment = new Payment()
                 {
                     Id = Guid.NewGuid(),
-    
+                    UserId = userId,
+                    Amount = amount,
+                    IdempotencyKey = Key,
+                    Status = "Processing",
+                    CreatedAt = DateTime.UtcNow
+
                 };
+
+                _paymentDBContext.Payments.Add(payment);
+                await _paymentDBContext.SaveChangesAsync();
+
+                // External Provider Çağır
+                var success = await _paymentProvider.ChargeAsync(amount);
+
+                payment.Status = success ? "Success" : "Failed";
+
+                await _paymentDBContext.SaveChangesAsync();
+
+                return Ok(payment);
+
+                    
+            }
+            catch(DbUpdateConcurrencyException dbex)
+            {
+
+            }
+            catch(DbUpdateException dbue)
+            {
+                //Unique constraint yakalandı 
+
+                var existing = await _paymentDBContext.Payments.FirstAsync
+                    (d => d.UserId == userId && d.IdempotencyKey == Key);
+                
+                return Ok(existing);
             }
             catch (Exception ex)
             {
 
                 throw;
+            }
+            finally
+            {
+                await _redisLockService.ReleaseAsync(compositeKey, TimeSpan.FromSeconds(15));
             }
 
 

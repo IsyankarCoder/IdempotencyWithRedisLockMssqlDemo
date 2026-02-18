@@ -1,4 +1,10 @@
 
+using IdempotencyWithRedisLockMssqlDemo.Database;
+using IdempotencyWithRedisLockMssqlDemo.Provider;
+using IdempotencyWithRedisLockMssqlDemo.Services;
+using Microsoft.EntityFrameworkCore;
+using StackExchange.Redis;
+
 namespace IdempotencyWithRedisLockMssqlDemo
 {
     public class Program
@@ -13,6 +19,17 @@ namespace IdempotencyWithRedisLockMssqlDemo
             // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
             builder.Services.AddOpenApi();
 
+
+
+            builder.Services.AddDbContext<PaymentDBContext>(options =>
+            {
+                options.UseSqlServer(builder.Configuration.GetConnectionString("Default"));
+            });
+
+            builder.Services.AddSingleton<IConnectionMultiplexer>(ConnectionMultiplexer.Connect("localhost:6380"));
+
+            builder.Services.AddSingleton<IRedisLockService, RedisLockService>();
+            builder.Services.AddSingleton<IPaymentProvider, FakePaymentProvider>();
             var app = builder.Build();
 
             // Configure the HTTP request pipeline.
