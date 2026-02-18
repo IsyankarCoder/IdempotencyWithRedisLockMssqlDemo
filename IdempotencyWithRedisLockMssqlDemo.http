@@ -1,0 +1,13 @@
+@IdempotencyWithRedisLockMssqlDemo_HostAddress = http://localhost:5224
+
+#if (EnableOpenAPI)
+GET {{IdempotencyWithRedisLockMssqlDemo_HostAddress}}/openapi/v1.json
+Accept: application/json
+
+###
+#endif
+
+GET {{IdempotencyWithRedisLockMssqlDemo_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
