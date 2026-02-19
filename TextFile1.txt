@@ -2,3 +2,11 @@ curl.exe -X POST "https://localhost:7223/api/payment" `
 -H "X-Idempotency-Key: abc123" `
 -H "Content-Type: application/json" `
 -d 100
+-d Usd
+
+
+curl.exe -X POST "https://localhost:7223/api/payment" `
+-H "X-Idempotency-Key: abc123" `
+-H "Content-Type: application/json" `
+-d Usd
+-d 100

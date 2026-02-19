@@ -4,6 +4,9 @@ using IdempotencyWithRedisLockMssqlDemo.Provider;
 using IdempotencyWithRedisLockMssqlDemo.Services;
 using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
+using Scalar;
+using Scalar.AspNetCore;
+using IdempotencyWithRedisLockMssqlDemo.Helper;
 
 namespace IdempotencyWithRedisLockMssqlDemo
 {
@@ -30,12 +33,16 @@ namespace IdempotencyWithRedisLockMssqlDemo
 
             builder.Services.AddSingleton<IRedisLockService, RedisLockService>();
             builder.Services.AddSingleton<IPaymentProvider, FakePaymentProvider>();
+            builder.Services.AddScoped<IdempotencyHashService>();
+
             var app = builder.Build();
 
             // Configure the HTTP request pipeline.
             if (app.Environment.IsDevelopment())
             {
                 app.MapOpenApi();
+                app.MapScalarApiReference();
+               
             }
 
             app.UseHttpsRedirection();
