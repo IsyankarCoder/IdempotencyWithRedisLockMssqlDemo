@@ -20,11 +20,8 @@ namespace IdempotencyWithRedisLockMssqlDemo.Middleware
             _logger = logger;
         }
 
-        public async Task InvokeAsync(
-            HttpContext context,
-            IRedisIdempotencyStore store)
+        public async Task InvokeAsync(HttpContext context, IRedisIdempotencyStore store)
         {
-            // Sadece POST
             if (!HttpMethods.IsPost(context.Request.Method) ||
                 !context.Request.Headers.TryGetValue(IdempotencyHeader, out var key) ||
                 string.IsNullOrWhiteSpace(key))
@@ -35,28 +32,43 @@ namespace IdempotencyWithRedisLockMssqlDemo.Middleware
 
             var idempotencyKey = key.ToString();
 
+            string? cachedResponse = null;
+            string? lockValue = null;
+            bool redisAlive = true;
+
+            // 🔹 CACHE GET (FAIL SAFE)
             try
             {
-                // 1️⃣ CACHE KONTROL
-                var cachedResponse = await store.GetAsync(idempotencyKey);
+                cachedResponse = await store.GetAsync(idempotencyKey);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Redis GET failed. Continuing without cache.");
+            }
 
-                if (!string.IsNullOrEmpty(cachedResponse))
+            if (!string.IsNullOrEmpty(cachedResponse))
+            {
+                await WriteResponseAsync(context, cachedResponse);
+                return;
+            }
+
+            // 🔹 LOCK ACQUIRE (FAIL SAFE)
+            try
+            {
+                lockValue = await store.AcquireAsyncLockWithLua(idempotencyKey, LockTtl);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Redis LOCK failed. Continuing without lock.");
+                redisAlive = false;
+            }
+
+            // Eğer lock alamadıysa ama Redis çalışıyorsa
+            if (redisAlive && lockValue == null)
+            {
+                try
                 {
-                    _logger.LogInformation("Idempotency cache HIT: {Key}", idempotencyKey);
-                    await WriteResponseAsync(context, cachedResponse);
-                    return;
-                }
-
-                // 2️⃣ LOCK AL
-                var lockValue = await store.AcquireAsyncLockWithLua(idempotencyKey, LockTtl);
-
-                if (lockValue is null)
-                {
-                    _logger.LogWarning("Lock conflict for key: {Key}", idempotencyKey);
-
-                    // kısa bekleme
                     await Task.Delay(200);
-
                     cachedResponse = await store.GetAsync(idempotencyKey);
 
                     if (!string.IsNullOrEmpty(cachedResponse))
@@ -64,51 +76,62 @@ namespace IdempotencyWithRedisLockMssqlDemo.Middleware
                         await WriteResponseAsync(context, cachedResponse);
                         return;
                     }
-
-                    context.Response.StatusCode = StatusCodes.Status409Conflict;
-                    await context.Response.WriteAsync("Duplicate request in progress");
-                    return;
+                }
+                catch
+                {
+                    // ignore
                 }
 
-                // 3️⃣ RESPONSE CAPTURE
-                var originalBody = context.Response.Body;
+                // Redis çalışıyor ama lock başka request'te
+                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                await context.Response.WriteAsync("Duplicate request in progress");
+                return;
+            }
 
-                await using var memoryStream = new MemoryStream();
-                context.Response.Body = memoryStream;
+            var originalBody = context.Response.Body;
 
-                try
+            await using var memoryStream = new MemoryStream();
+            context.Response.Body = memoryStream;
+
+            try
+            {
+                await _next(context);
+
+                memoryStream.Position = 0;
+                var responseBody = await new StreamReader(memoryStream).ReadToEndAsync();
+
+                if (context.Response.StatusCode >= 200 &&
+                    context.Response.StatusCode < 300)
                 {
-                    await _next(context);
-
-                    memoryStream.Position = 0;
-                    var responseBody = await new StreamReader(memoryStream).ReadToEndAsync();
-
-                    // 4️⃣ SADECE 2XX ise cache yaz
-                    if (context.Response.StatusCode >= 200 &&
-                        context.Response.StatusCode < 300)
+                    try
                     {
                         await store.SetAsync(idempotencyKey, responseBody, CacheTtl);
-                        _logger.LogInformation("Response cached for key: {Key}", idempotencyKey);
                     }
-
-                    // Response'u geri yaz
-                    memoryStream.Position = 0;
-
-                    context.Response.Body = originalBody;
-                    context.Response.ContentLength = memoryStream.Length;
-
-                    await memoryStream.CopyToAsync(originalBody);
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Redis SET failed. Skipping cache write.");
+                    }
                 }
-                finally
-                {
-                    // 5️⃣ LOCK BIRAK (garantili)
-                    await store.ReleaseLockAsyncWithLua(idempotencyKey, lockValue);
-                }
+
+                memoryStream.Position = 0;
+                context.Response.Body = originalBody;
+                context.Response.ContentLength = memoryStream.Length;
+
+                await memoryStream.CopyToAsync(originalBody);
             }
-            catch (Exception ex)
+            finally
             {
-                _logger.LogError(ex, "Idempotency middleware error for key {Key}", idempotencyKey);
-                throw; // global exception handler’a bırak
+                if (lockValue != null)
+                {
+                    try
+                    {
+                        await store.ReleaseLockAsyncWithLua(idempotencyKey, lockValue);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Redis RELEASE failed.");
+                    }
+                }
             }
         }
 

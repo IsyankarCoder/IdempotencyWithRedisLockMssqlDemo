@@ -37,6 +37,7 @@ namespace IdempotencyWithRedisLockMssqlDemo.Services
 
         public async Task<string> GetAsync(string key)
         {
+
             var value = await _db.StringGetAsync(key, CommandFlags.None);
             return value.HasValue ? value.ToString() :  null;
 
