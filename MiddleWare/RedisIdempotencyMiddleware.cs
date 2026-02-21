@@ -1,113 +1,128 @@
 ﻿using IdempotencyWithRedisLockMssqlDemo.Services;
-using System.Net;
+using System.Text;
 
-namespace IdempotencyWithRedisLockMssqlDemo.MiddleWare
+namespace IdempotencyWithRedisLockMssqlDemo.Middleware
 {
     public class RedisIdempotencyMiddleware
     {
-        private readonly RequestDelegate _requestDelegate;
+        private readonly RequestDelegate _next;
         private readonly ILogger<RedisIdempotencyMiddleware> _logger;
 
+        private const string IdempotencyHeader = "X-Idempotency-Key";
+        private static readonly TimeSpan LockTtl = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan CacheTtl = TimeSpan.FromHours(24);
 
-        public RedisIdempotencyMiddleware(RequestDelegate requestDelegate,
-                                          ILogger<RedisIdempotencyMiddleware> logger)
+        public RedisIdempotencyMiddleware(
+            RequestDelegate next,
+            ILogger<RedisIdempotencyMiddleware> logger)
         {
+            _next = next;
             _logger = logger;
-            _requestDelegate = requestDelegate;
         }
 
-        public async Task InvokeAsync(HttpContext httpContext,
-                                      IRedisIdempotencyStore redisIdempotencyStore)
+        public async Task InvokeAsync(
+            HttpContext context,
+            IRedisIdempotencyStore store)
         {
-            // Yalnızca POST ve X-Idempotency-Key ile çalış
-
-            if (!HttpMethods.IsPost(httpContext.Request.Method) ||
-               !httpContext.Request.Headers.TryGetValue("X-Idempotency-Key", out var key))
+            // Sadece POST
+            if (!HttpMethods.IsPost(context.Request.Method) ||
+                !context.Request.Headers.TryGetValue(IdempotencyHeader, out var key) ||
+                string.IsNullOrWhiteSpace(key))
             {
-                await _requestDelegate(httpContext);
+                await _next(context);
                 return;
             }
 
-            var IdempontencyKey = key.ToString();
-
-            // 1-> cache control
-            var cacheResponse = await redisIdempotencyStore.GetAsync(IdempontencyKey);
-            if (cacheResponse is not null)
-            {
-
-                _logger.LogDebug("Idempotency cache hit for key {Key}", IdempontencyKey);
-                await WriteCachedResponse(httpContext, cacheResponse);
-                return;
-            }
-
-            // 2-> Lock Al 10sn liğine
-            var lockValue = await redisIdempotencyStore.AcquireAsyncLockWithLua(IdempontencyKey, TimeSpan.FromSeconds(10));
-            if (lockValue is null)
-            {
-                // kısa bekleme ve tekrar cache control 
-
-                await Task.Delay(200);
-
-                cacheResponse = await redisIdempotencyStore.GetAsync(IdempontencyKey);
-                if (cacheResponse is not null)
-                {
-                    _logger.LogDebug("Idempotency cache hit after lock wait for key {Key}", IdempontencyKey.ToString());
-                    await WriteCachedResponse(httpContext, cacheResponse);
-                    return;
-                }
-
-                httpContext.Response.StatusCode = (int)HttpStatusCode.Conflict;
-                await httpContext.Response.WriteAsync("Duplicate request in progress");
-                return;
-            }
-
-            // 3--> Response Capture
-            var originalBody = httpContext.Response.Body;
-            
-            await using var memoryStream = new MemoryStream();
-            httpContext.Response.Body = memoryStream;
+            var idempotencyKey = key.ToString();
 
             try
             {
-                await _requestDelegate(httpContext);
-                memoryStream.Position = 0;
+                // 1️⃣ CACHE KONTROL
+                var cachedResponse = await store.GetAsync(idempotencyKey);
 
-                var responseBody = await new StreamReader(memoryStream).ReadToEndAsync();
-
-                // 4 --> Başarılı response ise cache yaz
-                if (httpContext.Response.StatusCode >= (int)HttpStatusCode.OK &&
-                    httpContext.Response.StatusCode < 300)
+                if (!string.IsNullOrEmpty(cachedResponse))
                 {
-                    await redisIdempotencyStore.SetAsync(IdempontencyKey,
-                                                         responseBody,
-                                                         TimeSpan.FromHours(24));
-
+                    _logger.LogInformation("Idempotency cache HIT: {Key}", idempotencyKey);
+                    await WriteResponseAsync(context, cachedResponse);
+                    return;
                 }
 
-                // 5 --> Clienta geri yaz
-                memoryStream.Position = 0;
-                httpContext.Response.Body = originalBody;
-                await memoryStream.CopyToAsync(originalBody);
+                // 2️⃣ LOCK AL
+                var lockValue = await store.AcquireAsyncLockWithLua(idempotencyKey, LockTtl);
+
+                if (lockValue is null)
+                {
+                    _logger.LogWarning("Lock conflict for key: {Key}", idempotencyKey);
+
+                    // kısa bekleme
+                    await Task.Delay(200);
+
+                    cachedResponse = await store.GetAsync(idempotencyKey);
+
+                    if (!string.IsNullOrEmpty(cachedResponse))
+                    {
+                        await WriteResponseAsync(context, cachedResponse);
+                        return;
+                    }
+
+                    context.Response.StatusCode = StatusCodes.Status409Conflict;
+                    await context.Response.WriteAsync("Duplicate request in progress");
+                    return;
+                }
+
+                // 3️⃣ RESPONSE CAPTURE
+                var originalBody = context.Response.Body;
+
+                await using var memoryStream = new MemoryStream();
+                context.Response.Body = memoryStream;
+
+                try
+                {
+                    await _next(context);
+
+                    memoryStream.Position = 0;
+                    var responseBody = await new StreamReader(memoryStream).ReadToEndAsync();
+
+                    // 4️⃣ SADECE 2XX ise cache yaz
+                    if (context.Response.StatusCode >= 200 &&
+                        context.Response.StatusCode < 300)
+                    {
+                        await store.SetAsync(idempotencyKey, responseBody, CacheTtl);
+                        _logger.LogInformation("Response cached for key: {Key}", idempotencyKey);
+                    }
+
+                    // Response'u geri yaz
+                    memoryStream.Position = 0;
+
+                    context.Response.Body = originalBody;
+                    context.Response.ContentLength = memoryStream.Length;
+
+                    await memoryStream.CopyToAsync(originalBody);
+                }
+                finally
+                {
+                    // 5️⃣ LOCK BIRAK (garantili)
+                    await store.ReleaseLockAsyncWithLua(idempotencyKey, lockValue);
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex.Message, ex);
-                throw;
+                _logger.LogError(ex, "Idempotency middleware error for key {Key}", idempotencyKey);
+                throw; // global exception handler’a bırak
             }
-            finally
-            {
-                // 6 lock bırak
-                await redisIdempotencyStore.ReleaseLockAsyncWithLua(IdempontencyKey, lockValue);
-
-            } 
-
         }
 
-
-        private static async Task WriteCachedResponse(HttpContext httpContext, string cachedRespone)
+        private static async Task WriteResponseAsync(
+            HttpContext context,
+            string body)
         {
-            httpContext.Response.ContentType = "application/json";
-            await httpContext.Response.WriteAsync(cachedRespone);
+            context.Response.Clear();
+            context.Response.StatusCode = StatusCodes.Status200OK;
+            context.Response.ContentType = "application/json";
+            context.Response.ContentLength = Encoding.UTF8.GetByteCount(body);
+
+            await context.Response.WriteAsync(body);
+            await context.Response.Body.FlushAsync();
         }
     }
 }

@@ -7,7 +7,7 @@ using StackExchange.Redis;
 using Scalar;
 using Scalar.AspNetCore;
 using IdempotencyWithRedisLockMssqlDemo.Helper;
-using IdempotencyWithRedisLockMssqlDemo.MiddleWare;
+using IdempotencyWithRedisLockMssqlDemo.Middleware;
 
 namespace IdempotencyWithRedisLockMssqlDemo
 {
