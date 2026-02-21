@@ -7,6 +7,7 @@ using StackExchange.Redis;
 using Scalar;
 using Scalar.AspNetCore;
 using IdempotencyWithRedisLockMssqlDemo.Helper;
+using IdempotencyWithRedisLockMssqlDemo.MiddleWare;
 
 namespace IdempotencyWithRedisLockMssqlDemo
 {
@@ -29,10 +30,18 @@ namespace IdempotencyWithRedisLockMssqlDemo
                 options.UseSqlServer(builder.Configuration.GetConnectionString("Default"));
             });
 
-            builder.Services.AddSingleton<IConnectionMultiplexer>(ConnectionMultiplexer.Connect("localhost:6380"));
+            //builder.Services.AddSingleton<IConnectionMultiplexer>(ConnectionMultiplexer.Connect("localhost:6380"));
+
+            builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
+            {
+                var configuration = ConfigurationOptions.Parse("localhost:6380");
+                configuration.AbortOnConnectFail = false;
+                return ConnectionMultiplexer.Connect(configuration);
+            });
 
             builder.Services.AddSingleton<IRedisLockService, RedisLockService>();
-            builder.Services.AddSingleton<IPaymentProvider, FakePaymentProvider>();
+            builder.Services.AddSingleton<IRedisIdempotencyStore, RedisIdempotencyStore>();
+            builder.Services.AddScoped<IPaymentProvider, FakePaymentProvider>();
             builder.Services.AddScoped<IdempotencyHashService>();
 
             var app = builder.Build();
@@ -45,11 +54,13 @@ namespace IdempotencyWithRedisLockMssqlDemo
                
             }
 
+            app.UseMiddleware<RedisIdempotencyMiddleware>();
+
             app.UseHttpsRedirection();
 
             app.UseAuthorization();
 
-
+            
             app.MapControllers();
 
             app.Run();
