@@ -1,0 +1,203 @@
+Süper 👌 şimdi gerçek production seviyesi bir çözüm yapıyoruz:
+
+🔥 Redis tamamen down ise
+30 saniye boyunca Redis’i otomatik bypass edelim
+Her request’te exception yemeyelim
+
+Bu mini Circuit Breaker olacak.
+
+🎯 Mantık
+
+Normal akış:
+
+Redis çalışıyor → lock & cache aktif
+
+Redis hata verirse:
+
+Exception →
+Circuit OPEN →
+30 saniye Redis tamamen bypass →
+Sonra HALF-OPEN test →
+Başarılıysa tekrar CLOSED
+🧠 State Diagram
+CLOSED  → (Redis error) →  OPEN
+OPEN    → (30 sn doldu)  →  HALF-OPEN
+HALF    → (başarılı)     →  CLOSED
+HALF    → (fail)         →  OPEN
+✅ 1️⃣ Mini Circuit Breaker Service
+
+Thread-safe, lightweight:
+
+public class RedisCircuitBreaker
+{
+    private readonly TimeSpan _breakDuration = TimeSpan.FromSeconds(30);
+
+    private DateTime _lastFailureTime = DateTime.MinValue;
+    private volatile bool _isOpen = false;
+
+    public bool IsOpen()
+    {
+        if (!_isOpen)
+            return false;
+
+        // Break süresi dolmuş mu?
+        if (DateTime.UtcNow - _lastFailureTime > _breakDuration)
+        {
+            _isOpen = false; // HALF-OPEN gibi davran
+            return false;
+        }
+
+        return true;
+    }
+
+    public void RecordFailure()
+    {
+        _isOpen = true;
+        _lastFailureTime = DateTime.UtcNow;
+    }
+
+    public void RecordSuccess()
+    {
+        _isOpen = false;
+    }
+}
+✅ 2️⃣ DI Kaydı
+
+Program.cs:
+
+builder.Services.AddSingleton<RedisCircuitBreaker>();
+
+Singleton olmalı ⚠️
+
+✅ 3️⃣ Middleware’e Entegrasyon
+
+Constructor’a ekliyoruz:
+
+private readonly RedisCircuitBreaker _circuit;
+
+public RedisIdempotencyMiddleware(
+    RequestDelegate next,
+    ILogger<RedisIdempotencyMiddleware> logger,
+    RedisCircuitBreaker circuit)
+{
+    _next = next;
+    _logger = logger;
+    _circuit = circuit;
+}
+✅ 4️⃣ Cache + Lock Öncesi Circuit Kontrolü
+
+Middleware başına ekle:
+
+if (_circuit.IsOpen())
+{
+    _logger.LogWarning("Redis circuit OPEN. Bypassing Redis.");
+    await _next(context);
+    return;
+}
+✅ 5️⃣ Redis Hatalarında Circuit Aç
+
+Örneğin GET sırasında:
+
+try
+{
+    cachedResponse = await store.GetAsync(idempotencyKey);
+    _circuit.RecordSuccess();
+}
+catch (Exception ex)
+{
+    _logger.LogWarning(ex, "Redis GET failed.");
+    _circuit.RecordFailure();
+    await _next(context);
+    return;
+}
+
+Lock kısmında da aynı şekilde:
+
+try
+{
+    lockValue = await store.AcquireAsyncLockWithLua(idempotencyKey, LockTtl);
+    _circuit.RecordSuccess();
+}
+catch (Exception ex)
+{
+    _logger.LogWarning(ex, "Redis LOCK failed.");
+    _circuit.RecordFailure();
+    await _next(context);
+    return;
+}
+🎯 Şimdi Ne Oldu?
+Senaryo: Redis Kapalı
+
+İlk request:
+
+Exception olur
+
+Circuit OPEN olur
+
+Controller çalışır
+
+Sonraki 30 saniye:
+
+Redis’e hiç dokunmaz
+
+Exception oluşmaz
+
+Direkt controller’a gider
+
+30 saniye sonra:
+
+Yeniden Redis denenir
+
+Eğer çalışıyorsa circuit kapanır
+
+🧪 Test Planı
+
+1️⃣ Redis’i kapat
+2️⃣ Request at
+
+Log:
+
+Redis GET failed
+Redis circuit OPEN
+
+3️⃣ 10 request daha at
+
+Artık Redis exception log’u gelmez.
+
+4️⃣ Redis’i aç
+5️⃣ 30 saniye bekle
+6️⃣ Request at
+
+Circuit kapanır, Redis tekrar aktif olur.
+
+🏆 Production Kazanımı
+Problem	Çözüm
+Redis down flood	Circuit breaker
+Her request timeout	Önlenir
+False 409	Önlenir
+System availability	Artar
+🔥 Artık Sistem Seviyesi
+
+Şu anda mimarin:
+
+DB unique = ultimate guard
+
+Redis lock = concurrency control
+
+Cache = replay
+
+Circuit breaker = resilience
+
+Fail-safe = degrade mode
+
+Bu yapı fintech production seviyesidir.
+
+İstersen bir üst seviyeye geçelim:
+
+🔥 Distributed multi-instance API (multi pod)
+
+🔥 Redis cluster + failover
+
+🔥 Polly ile full resilience
+
+🔥 Stripe-level idempotency mimarisi

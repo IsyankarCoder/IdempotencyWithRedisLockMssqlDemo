@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/Solution Items/">
     <File Path="TextFile1.txt" />
+    <File Path="Todo-Yapılacak.txt" />
   </Folder>
   <Project Path="IdempotencyWithRedisLockMssqlDemo.csproj" />
 </Solution>
