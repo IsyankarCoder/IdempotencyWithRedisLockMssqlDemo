@@ -30,6 +30,9 @@ namespace IdempotencyWithRedisLockMssqlDemo
                 options.UseSqlServer(builder.Configuration.GetConnectionString("Default"));
             });
 
+
+            builder.Services.AddHealthChecks().AddRedis("localhost:6380", name: "redis");
+
             //builder.Services.AddSingleton<IConnectionMultiplexer>(ConnectionMultiplexer.Connect("localhost:6380"));
 
             builder.Services.AddSingleton<IConnectionMultiplexer>(sp =>
@@ -62,6 +65,8 @@ namespace IdempotencyWithRedisLockMssqlDemo
 
             
             app.MapControllers();
+
+            app.MapHealthChecks("/health");
 
             app.Run();
         }
